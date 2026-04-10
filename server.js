@@ -33,15 +33,24 @@ app.post("/api/session", async (req, res) => {
       })
     });
 
+    const rawText = await response.text();
+    let data;
+
+    try {
+      data = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      data = { raw: rawText };
+    }
+
+    console.log("Roboflow session response:", data);
+
     if (!response.ok) {
-      const text = await response.text();
       return res.status(response.status).json({
         error: "Failed to create Roboflow session",
-        details: text
+        details: data
       });
     }
 
-    const data = await response.json();
     res.json(data);
   } catch (error) {
     console.error("Session creation failed:", error);
@@ -59,4 +68,9 @@ app.get("*", (_req, res) => {
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
+  console.log("Environment check:", {
+    hasApiKey: Boolean(process.env.ROBOFLOW_API_KEY),
+    workspace: process.env.WORKSPACE_ID,
+    workflow: process.env.WORKFLOW_ID
+  });
 });
