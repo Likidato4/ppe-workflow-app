@@ -19,7 +19,7 @@ let frameCtx = null;
 let drawFrameId = null;
 
 const ROBOFLOW_CONFIG = {
-  apiKey: "YOUR_PRIVATE_OR_STREAMING_KEY_HERE",
+  apiKey: "YOUR_STREAMING_KEY_HERE",
   workspaceName: "rpsppedetections",
   workflowId: "detect-count-and-visualize-5",
   imageInputName: "image",
