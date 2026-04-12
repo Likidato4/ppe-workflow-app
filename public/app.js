@@ -1,3 +1,5 @@
+import { connectors, webrtc, streams } from "@roboflow/inference-sdk";
+
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const statusEl = document.getElementById("status");
@@ -8,13 +10,22 @@ const predictionOutput = document.getElementById("predictionOutput");
 const viewerPlaceholder = document.getElementById("viewerPlaceholder");
 const sessionState = document.getElementById("sessionState");
 
-let stream = null;
-let pc = null;
-let dataChannel = null;
+let cameraStream = null;
+let connection = null;
+let remoteStream = null;
 let remoteVideo = null;
 let frameCanvas = null;
 let frameCtx = null;
 let drawFrameId = null;
+
+const ROBOFLOW_CONFIG = {
+  apiKey: "YOUR_PRIVATE_OR_STREAMING_KEY_HERE",
+  workspaceName: "rpsppedetections",
+  workflowId: "detect-count-and-visualize-5",
+  imageInputName: "image",
+  streamOutputNames: ["output_image"],
+  dataOutputNames: ["count_objects", "predictions"]
+};
 
 function setStatus(message) {
   if (statusEl) statusEl.textContent = message;
@@ -36,7 +47,14 @@ function resetPredictionPanel() {
   if (predictionOutput) predictionOutput.textContent = "No predictions yet.";
 }
 
-function ensureRemoteRenderer() {
+function stopFrameLoop() {
+  if (drawFrameId) {
+    cancelAnimationFrame(drawFrameId);
+    drawFrameId = null;
+  }
+}
+
+function ensureRenderer() {
   if (!remoteVideo) {
     remoteVideo = document.createElement("video");
     remoteVideo.autoplay = true;
@@ -47,13 +65,6 @@ function ensureRemoteRenderer() {
   if (!frameCanvas) {
     frameCanvas = document.createElement("canvas");
     frameCtx = frameCanvas.getContext("2d");
-  }
-}
-
-function stopFrameLoop() {
-  if (drawFrameId) {
-    cancelAnimationFrame(drawFrameId);
-    drawFrameId = null;
   }
 }
 
@@ -88,17 +99,84 @@ function startFrameLoop() {
   draw();
 }
 
-function cleanupConnectionOnly() {
+async function startApp() {
+  try {
+    setButtons(true);
+    setStatus("Opening webcam...");
+    resetPredictionPanel();
+
+    cameraStream = await streams.useCamera({
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        facingMode: { ideal: "environment" }
+      }
+    });
+
+    localVideo.srcObject = cameraStream;
+    await localVideo.play();
+
+    setPlaceholderVisible(false);
+    setStatus("Connecting to Roboflow workflow...");
+
+    const connector = connectors.withApiKey(ROBOFLOW_CONFIG.apiKey);
+
+    connection = await webrtc.useStream({
+      source: cameraStream,
+      connector,
+      wrtcParams: {
+        workspaceName: ROBOFLOW_CONFIG.workspaceName,
+        workflowId: ROBOFLOW_CONFIG.workflowId,
+        imageInputName: ROBOFLOW_CONFIG.imageInputName,
+        streamOutputNames: ROBOFLOW_CONFIG.streamOutputNames,
+        dataOutputNames: ROBOFLOW_CONFIG.dataOutputNames
+      },
+      onData: (data) => {
+        console.log("Workflow data:", data);
+
+        const predictions = Array.isArray(data?.predictions) ? data.predictions : [];
+        if (detectionCount) detectionCount.textContent = String(predictions.length);
+        if (predictionOutput) predictionOutput.textContent = JSON.stringify(data, null, 2);
+      }
+    });
+
+    remoteStream = await connection.remoteStream();
+
+    ensureRenderer();
+    remoteVideo.srcObject = remoteStream;
+
+    remoteVideo.onloadedmetadata = async () => {
+      try {
+        await remoteVideo.play();
+      } catch (error) {
+        console.error("Remote stream play error:", error);
+      }
+      startFrameLoop();
+    };
+
+    setStatus("Workflow stream live");
+  } catch (error) {
+    console.error("Start app error:", error);
+    setStatus(`Error: ${error.message}`);
+    stopApp();
+  }
+}
+
+async function stopApp() {
   stopFrameLoop();
 
-  if (dataChannel) {
-    dataChannel.close();
-    dataChannel = null;
+  try {
+    if (connection) {
+      await connection.cleanup();
+      connection = null;
+    }
+  } catch (error) {
+    console.error("Cleanup error:", error);
   }
 
-  if (pc) {
-    pc.close();
-    pc = null;
+  if (cameraStream) {
+    cameraStream.getTracks().forEach((track) => track.stop());
+    cameraStream = null;
   }
 
   if (remoteVideo) {
@@ -106,180 +184,14 @@ function cleanupConnectionOnly() {
     remoteVideo.srcObject = null;
   }
 
-  if (annotatedFrame) {
-    annotatedFrame.removeAttribute("src");
-    annotatedFrame.style.display = "none";
-  }
-}
-
-async function startApp() {
-  try {
-    console.log("Start button clicked");
-    setButtons(true);
-    setStatus("Requesting webcam...");
-    resetPredictionPanel();
-
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 1280, height: 720 },
-      audio: false
-    });
-
-    console.log("Webcam granted");
-    localVideo.srcObject = stream;
-    await localVideo.play();
-
-    setPlaceholderVisible(false);
-    setStatus("Creating workflow session...");
-
-    const sessionRes = await fetch("/api/session", {
-      method: "POST"
-    });
-
-    console.log("Session response status:", sessionRes.status);
-
-    const session = await sessionRes.json();
-    console.log("Workflow session:", session);
-
-    if (!sessionRes.ok) {
-      throw new Error(
-        typeof session.details === "string"
-          ? session.details
-          : JSON.stringify(session.details || session.error || "Failed to create session")
-      );
-    }
-
-    if (!session.offer || !session.answer_url) {
-      throw new Error("Session response is missing required WebRTC fields: offer or answer_url");
-    }
-
-    setStatus("Connecting to workflow...");
-
-    pc = new RTCPeerConnection({
-      iceServers: session.ice_servers || []
-    });
-
-    stream.getTracks().forEach((track) => {
-      pc.addTrack(track, stream);
-    });
-
-    pc.onconnectionstatechange = () => {
-      console.log("Peer connection state:", pc.connectionState);
-
-      if (pc.connectionState === "connected") {
-        setStatus("Workflow stream live");
-      } else if (pc.connectionState === "connecting" || pc.connectionState === "new") {
-        setStatus("Connecting to workflow...");
-      } else if (pc.connectionState === "failed") {
-        setStatus("Workflow connection failed");
-      } else if (pc.connectionState === "disconnected") {
-        setStatus("Workflow disconnected");
-      } else if (pc.connectionState === "closed") {
-        setStatus("Workflow closed");
-      }
-    };
-
-    pc.oniceconnectionstatechange = () => {
-      console.log("ICE state:", pc.iceConnectionState);
-    };
-
-    pc.ontrack = (event) => {
-      const [remoteStream] = event.streams;
-      console.log("Remote workflow stream received:", remoteStream);
-
-      ensureRemoteRenderer();
-      remoteVideo.srcObject = remoteStream;
-
-      remoteVideo.onloadedmetadata = async () => {
-        try {
-          await remoteVideo.play();
-          console.log("Remote annotated stream playing");
-        } catch (error) {
-          console.error("Remote video play error:", error);
-        }
-        startFrameLoop();
-      };
-    };
-
-    pc.ondatachannel = (event) => {
-      dataChannel = event.channel;
-      console.log("Data channel received:", dataChannel.label);
-
-      dataChannel.onopen = () => {
-        console.log("Data channel opened");
-      };
-
-      dataChannel.onmessage = (msg) => {
-        try {
-          const data = JSON.parse(msg.data);
-          console.log("Workflow data:", data);
-
-          const predictions = Array.isArray(data.predictions) ? data.predictions : [];
-          if (detectionCount) detectionCount.textContent = String(predictions.length);
-          if (predictionOutput) predictionOutput.textContent = JSON.stringify(data, null, 2);
-        } catch (err) {
-          console.error("Data parse error:", err);
-        }
-      };
-
-      dataChannel.onerror = (error) => {
-        console.error("Data channel error:", error);
-      };
-
-      dataChannel.onclose = () => {
-        console.log("Data channel closed");
-      };
-    };
-
-    await pc.setRemoteDescription({
-      type: "offer",
-      sdp: session.offer
-    });
-
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    const answerRes = await fetch(session.answer_url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        answer: answer.sdp
-      })
-    });
-
-    if (!answerRes.ok) {
-      const answerText = await answerRes.text();
-      throw new Error(`Failed to send WebRTC answer: ${answerText}`);
-    }
-
-    setStatus("Starting workflow stream...");
-  } catch (error) {
-    console.error("Start app error:", error);
-    setStatus(`Error: ${error.message}`);
-
-    if (predictionOutput) {
-      predictionOutput.textContent = `Startup error:\n${error.message}`;
-    }
-
-    cleanupConnectionOnly();
-
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-  }
-}
-
-function stopApp() {
-  cleanupConnectionOnly();
-
-  if (stream) {
-    stream.getTracks().forEach((track) => track.stop());
-    stream = null;
-  }
-
   if (localVideo) {
     localVideo.pause();
     localVideo.srcObject = null;
+  }
+
+  if (annotatedFrame) {
+    annotatedFrame.removeAttribute("src");
+    annotatedFrame.style.display = "none";
   }
 
   resetPredictionPanel();
