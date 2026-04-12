@@ -88,8 +88,33 @@ function startFrameLoop() {
   draw();
 }
 
+function cleanupConnectionOnly() {
+  stopFrameLoop();
+
+  if (dataChannel) {
+    dataChannel.close();
+    dataChannel = null;
+  }
+
+  if (pc) {
+    pc.close();
+    pc = null;
+  }
+
+  if (remoteVideo) {
+    remoteVideo.pause();
+    remoteVideo.srcObject = null;
+  }
+
+  if (annotatedFrame) {
+    annotatedFrame.removeAttribute("src");
+    annotatedFrame.style.display = "none";
+  }
+}
+
 async function startApp() {
   try {
+    console.log("Start button clicked");
     setButtons(true);
     setStatus("Requesting webcam...");
     resetPredictionPanel();
@@ -99,6 +124,7 @@ async function startApp() {
       audio: false
     });
 
+    console.log("Webcam granted");
     localVideo.srcObject = stream;
     await localVideo.play();
 
@@ -109,7 +135,10 @@ async function startApp() {
       method: "POST"
     });
 
+    console.log("Session response status:", sessionRes.status);
+
     const session = await sessionRes.json();
+    console.log("Workflow session:", session);
 
     if (!sessionRes.ok) {
       throw new Error(
@@ -119,7 +148,11 @@ async function startApp() {
       );
     }
 
-    console.log("Workflow session:", session);
+    if (!session.offer || !session.answer_url) {
+      throw new Error("Session response is missing required WebRTC fields: offer or answer_url");
+    }
+
+    setStatus("Connecting to workflow...");
 
     pc = new RTCPeerConnection({
       iceServers: session.ice_servers || []
@@ -136,13 +169,17 @@ async function startApp() {
         setStatus("Workflow stream live");
       } else if (pc.connectionState === "connecting" || pc.connectionState === "new") {
         setStatus("Connecting to workflow...");
-      } else if (
-        pc.connectionState === "failed" ||
-        pc.connectionState === "disconnected" ||
-        pc.connectionState === "closed"
-      ) {
-        setStatus(`Connection ${pc.connectionState}`);
+      } else if (pc.connectionState === "failed") {
+        setStatus("Workflow connection failed");
+      } else if (pc.connectionState === "disconnected") {
+        setStatus("Workflow disconnected");
+      } else if (pc.connectionState === "closed") {
+        setStatus("Workflow closed");
       }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log("ICE state:", pc.iceConnectionState);
     };
 
     pc.ontrack = (event) => {
@@ -155,6 +192,7 @@ async function startApp() {
       remoteVideo.onloadedmetadata = async () => {
         try {
           await remoteVideo.play();
+          console.log("Remote annotated stream playing");
         } catch (error) {
           console.error("Remote video play error:", error);
         }
@@ -164,6 +202,7 @@ async function startApp() {
 
     pc.ondatachannel = (event) => {
       dataChannel = event.channel;
+      console.log("Data channel received:", dataChannel.label);
 
       dataChannel.onopen = () => {
         console.log("Data channel opened");
@@ -199,7 +238,7 @@ async function startApp() {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
-    await fetch(session.answer_url, {
+    const answerRes = await fetch(session.answer_url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -209,45 +248,38 @@ async function startApp() {
       })
     });
 
+    if (!answerRes.ok) {
+      const answerText = await answerRes.text();
+      throw new Error(`Failed to send WebRTC answer: ${answerText}`);
+    }
+
     setStatus("Starting workflow stream...");
   } catch (error) {
     console.error("Start app error:", error);
     setStatus(`Error: ${error.message}`);
-    stopApp();
+
+    if (predictionOutput) {
+      predictionOutput.textContent = `Startup error:\n${error.message}`;
+    }
+
+    cleanupConnectionOnly();
+
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
   }
 }
 
 function stopApp() {
-  stopFrameLoop();
-
-  if (dataChannel) {
-    dataChannel.close();
-    dataChannel = null;
-  }
-
-  if (pc) {
-    pc.close();
-    pc = null;
-  }
+  cleanupConnectionOnly();
 
   if (stream) {
     stream.getTracks().forEach((track) => track.stop());
     stream = null;
   }
 
-  if (remoteVideo) {
-    remoteVideo.pause();
-    remoteVideo.srcObject = null;
-  }
-
   if (localVideo) {
     localVideo.pause();
     localVideo.srcObject = null;
-  }
-
-  if (annotatedFrame) {
-    annotatedFrame.removeAttribute("src");
-    annotatedFrame.style.display = "none";
   }
 
   resetPredictionPanel();
