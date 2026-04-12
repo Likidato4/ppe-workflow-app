@@ -3,20 +3,28 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const envPath = path.join(__dirname, ".env");
+
+const dotenvResult = dotenv.config({ path: envPath });
+
+console.log("Dotenv load result:", {
+  envPath,
+  loaded: !dotenvResult.error,
+  error: dotenvResult.error?.message || null
+});
 
 console.log("Environment check:", {
+  cwd: process.cwd(),
   hasApiKey: Boolean(process.env.ROBOFLOW_API_KEY),
-  apiKeyPrefix: process.env.ROBOFLOW_API_KEY?.slice(0, 4),
-  workspace: process.env.WORKSPACE_ID,
-  workflow: process.env.WORKFLOW_ID
+  apiKeyPrefix: process.env.ROBOFLOW_API_KEY?.slice(0, 4) || null,
+  workspace: process.env.WORKSPACE_ID || null,
+  workflow: process.env.WORKFLOW_ID || null
 });
 
 const app = express();
 app.use(express.json());
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -53,10 +61,7 @@ app.post("/api/session", async (_req, res) => {
 
     console.log("Creating Roboflow session with:", {
       workspace: requestBody.workspace,
-      workflow_id: requestBody.workflow_id,
-      image_input_name: requestBody.image_input_name,
-      stream_output: requestBody.stream_output,
-      data_output: requestBody.data_output
+      workflow_id: requestBody.workflow_id
     });
 
     const response = await fetch("https://serverless.roboflow.com/infer/workflows/stream", {
@@ -83,13 +88,6 @@ app.post("/api/session", async (_req, res) => {
     if (!response.ok) {
       return res.status(response.status).json({
         error: "Failed to create Roboflow session",
-        details: data
-      });
-    }
-
-    if (!data.offer || !data.answer_url) {
-      return res.status(500).json({
-        error: "Roboflow session response missing required fields",
         details: data
       });
     }
